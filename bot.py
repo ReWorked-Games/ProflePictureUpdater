@@ -1,38 +1,49 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import requests
 import io
 import os
 
-# 1. Force load required gateway intents
+# 1. Standard intents for server profile updates
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True 
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+class CustomBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
+
+    async def setup_hook(self):
+        # This registers the slash commands globally to Discord's servers
+        await self.tree.sync()
+        print("SLASH COMMANDS: Successfully synced globally.")
+
+bot = CustomBot()
 
 @bot.event
 async def on_ready():
     print("----------------------------------------")
-    print(f"ONLINE: {bot.user.name} is running perfectly.")
+    print(f"ONLINE: {bot.user.name} is ready for slash commands.")
     print("----------------------------------------")
 
-@bot.command(name="syncpfp")
-async def syncpfp(ctx):
-    """Automatically finds the sender's linked Roblox account and applies it."""
-    discord_user_id = ctx.author.id
-    target_member = ctx.author
+# 2. Define the Slash Command
+@bot.tree.command(name="syncpfp", description="Automatically connects and matches your server profile to your linked Roblox account.")
+async def syncpfp(interaction: discord.Interaction):
+    """Slash command to auto-lookup the executor's verified Roblox account."""
+    discord_user_id = interaction.user.id
+    target_member = interaction.user
 
-    # Instant confirmation that the command fired
-    await ctx.send("⏳ Searching public registry for your connected Roblox account...")
+    # Acknowledge the slash command instantly so Discord doesn't say "Interaction Failed"
+    await interaction.response.send_message("⏳ Accessing database... Searching for your verified Roblox link.")
 
+    # Step 1: Hit the public unauthenticated RoVer integration proxy
+    rover_url = f"https://rover.link{discord_user_id}"
+    
     try:
-        # Step 1: Query the unauthenticated, open RoVer Registry API for the executor's ID
-        rover_url = f"https://rover.link{discord_user_id}"
         rover_resp = requests.get(rover_url)
         
         if rover_resp.status_code != 200:
-            await ctx.send("❌ Error: You are not verified! Please link your account for free at https://rover.link first.")
+            await interaction.followup.send("❌ Link Not Found: Go to https://rover.link and verify your account first.")
             return
             
         data_payload = rover_resp.json()
@@ -40,37 +51,35 @@ async def syncpfp(ctx):
         roblox_username = data_payload.get("robloxUsername")
         
         if not roblox_id:
-            await ctx.send("❌ Error: No verified Roblox account found linked to your Discord profile.")
+            await interaction.followup.send("❌ Error: No Roblox data bound to this Discord ID.")
             return
 
-        # Step 2: Grab the exact headshot image link belonging to THEIR verified account
+        # Step 2: Extract the image path string from the dictionary array
         roblox_api = f"https://roblox.com{roblox_id}&size=150x150&format=Png&isCircular=false"
         roblox_data = requests.get(roblox_api).json()
-        raw_image_url = roblox_data['data'][0]['imageUrl']
+        raw_image_url = roblox_data['data']['imageUrl']
 
-        # Step 3: Stream the image bytes directly into memory
+        # Step 3: Stream the image download into the buffer
         image_stream = requests.get(raw_image_url).content
         byte_buffer = io.BytesIO(image_stream)
 
-        # Step 4: Securely apply it only to the user who ran the command
+        # Step 4: Force apply settings to the user's server profile
         try:
-            # Changes their server nickname to match their verified Roblox name
             if roblox_username:
                 await target_member.edit(nick=roblox_username)
             
-            # Upgrades their server-specific profile picture
             await target_member.edit(avatar=byte_buffer.read())
-            await ctx.send(f"🎯 Success! Updated your profile to match your verified Roblox account: **{roblox_username}** (`{roblox_id}`)")
+            await interaction.followup.send(f"🎯 Success! Profile synced to Roblox user: **{roblox_username}** (`{roblox_id}`)")
             
         except discord.Forbidden:
-            await ctx.send("❌ Discord Permission Error: Move the Bot's Role to the **VERY TOP** of your Server Settings role list, or it can't edit your profile.")
+            await interaction.followup.send("❌ Discord Permission Error: Move the Bot's Role to the **VERY TOP** of your Server Settings role list.")
 
     except Exception as error:
-        await ctx.send(f"⚠️ Process Crash Prevented: `{str(error)}`")
+        await interaction.followup.send(f"⚠️ Internal Processing Failure: `{str(error)}`")
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if token:
         bot.run(token)
-    else:
-        print("CRITICAL: DISCORD_TOKEN is missing.")
+else:
+    print("CRITICAL: DISCORD_TOKEN is missing.")
