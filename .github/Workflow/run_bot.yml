@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */5 * * *' # Automatically restarts every 5 hours to bypass timeouts
+    - cron: '0 */5 * * *'
 
 jobs:
   run-bot:
@@ -23,11 +23,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run Discord Bot in Background
+    - name: Run Discord Bot with Live Stream
       env:
         DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
-      # nohup keeps it alive, & detaches it so GitHub UI unfreezes instantly
-      run: |
-        nohup python bot.py > bot_output.log 2>&1 &
-        sleep 5
-        cat bot_output.log
+      # Python -u unbuffers the output so you see live updates instantly
+      run: python -u bot.py
