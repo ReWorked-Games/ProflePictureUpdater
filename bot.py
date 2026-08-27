@@ -1,95 +1,253 @@
-import discord
-from discord.ext import commands
-import aiohttp
-import io
 import os
+import asyncio
+import discord
+import aiohttp
+from discord.ext import commands
 
-# 1. Initialize exact intents required for tracking text strings and profiles
+# ============================================================
+# CONFIG
+# ============================================================
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+# How long before the same Discord user can be checked again
+SYNC_COOLDOWN = 60  # seconds
+
+
+# ============================================================
+# DISCORD INTENTS
+# ============================================================
+
 intents = discord.Intents.default()
-intents.members = True          # Allows changing server avatars and names
-intents.message_content = True  # Allows catching chat message activity triggers
+intents.members = True
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    help_command=None
+)
 
-async def auto_sync_profile(member: discord.Member):
-    """Asynchronous background worker that safely pulls linked Roblox assets."""
+
+# ============================================================
+# CACHE / COOLDOWN
+# ============================================================
+
+last_sync = {}
+
+
+# ============================================================
+# ROBLOX / ROVER LOOKUP
+# ============================================================
+
+async def get_rover_username(discord_user_id: int):
+    """
+    Look up a Discord user's linked Roblox username.
+
+    NOTE:
+    The Rover API endpoint must match the actual Rover API you
+    have access to. The old `https://rover.link{member.id}` URL
+    was malformed.
+    """
+
+    # Replace this with the actual Rover endpoint you intend to use.
+    url = f"https://rover.link/api/user/{discord_user_id}"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as response:
+
+                if response.status != 200:
+                    print(
+                        f"ROVER LOOKUP FAILED: "
+                        f"Discord ID {discord_user_id} "
+                        f"returned HTTP {response.status}"
+                    )
+                    return None
+
+                try:
+                    data = await response.json()
+                except Exception:
+                    print("ROVER ERROR: Response was not valid JSON.")
+                    return None
+
+                return data.get("robloxUsername")
+
+    except asyncio.TimeoutError:
+        print("ROVER ERROR: Request timed out.")
+        return None
+
+    except aiohttp.ClientError as error:
+        print(f"ROVER ERROR: {error}")
+        return None
+
+    except Exception as error:
+        print(f"ROVER CRASH SHIELD: {error}")
+        return None
+
+
+# ============================================================
+# NICKNAME SYNC
+# ============================================================
+
+async def auto_sync_nickname(member: discord.Member):
+    """
+    Automatically synchronize the Discord nickname with
+    the user's linked Roblox username.
+    """
+
     if member.bot:
         return
 
-    # Use a non-blocking asynchronous session handler
-    async with aiohttp.ClientSession() as session:
-        # Step 1: Query the unauthenticated RoVer proxy registry using aiohttp
-        rover_url = f"https://rover.link{member.id}"
-        
-        try:
-            async with session.get(rover_url) as rover_resp:
-                if rover_resp.status != 200:
-                    return  # Fail quietly if the user has never linked on rover.link
-                
-                data_payload = await rover_resp.json()
-                roblox_id = data_payload.get("robloxId")
-                roblox_username = data_payload.get("robloxUsername")
+    now = asyncio.get_running_loop().time()
 
-            if not roblox_id:
-                return
+    last_time = last_sync.get(member.id)
 
-            # Step 2: Request the image string array safely from the official Roblox CDN endpoints
-            roblox_api = f"https://roblox.com{roblox_id}&size=150x150&format=Png&isCircular=false"
-            async with session.get(roblox_api) as roblox_resp:
-                if roblox_resp.status != 200:
-                    return
-                
-                roblox_data = await roblox_resp.json()
-                raw_image_url = roblox_data['data'][0]['imageUrl']  # Target explicit index 0 wrapper mapping
+    if last_time is not None:
+        if now - last_time < SYNC_COOLDOWN:
+            return
 
-            # Step 3: Stream the raw picture asset download cleanly into a memory buffer
-            async with session.get(raw_image_url) as img_resp:
-                if img_resp.status != 200:
-                    return
-                img_bytes = await img_resp.read()
-                byte_buffer = io.BytesIO(img_bytes)
+    # Update cooldown BEFORE making request so message spam
+    # cannot create many simultaneous requests.
+    last_sync[member.id] = now
 
-            # Step 4: Execute server-specific profile upgrades safely
-            # Changes their server nickname to match their Roblox account name
-            if roblox_username and member.nick != roblox_username:
-                try:
-                    await member.edit(nick=roblox_username)
-                except discord.Forbidden:
-                    print(f"HIERARCHY EXCEPTION: Cannot rename {member.name} (Owner or higher role).")
+    roblox_username = await get_rover_username(member.id)
 
-            # Updates their server-specific avatar image inside this server
-            try:
-                await member.edit(avatar=byte_buffer.read())
-                print(f"AUTOMATION SUCCESS: Synced profile assets for {member.name}.")
-            except discord.Forbidden:
-                print(f"HIERARCHY EXCEPTION: Cannot update avatar image for {member.name}.")
+    if not roblox_username:
+        return
 
-        except Exception as error:
-            print(f"BACKGROUND CRASH SHIELD: Handled connection event anomaly: {str(error)}")
+    # Roblox usernames have a maximum length of 20 characters.
+    # Discord nicknames can be longer, but keeping the returned
+    # Roblox username unchanged is what we want here.
+    if member.nick == roblox_username:
+        return
 
+    try:
+        await member.edit(
+            nick=roblox_username,
+            reason="Automatic Roblox nickname synchronization"
+        )
+
+        print(
+            f"AUTOMATION SUCCESS: "
+            f"{member} -> {roblox_username}"
+        )
+
+    except discord.Forbidden:
+        print(
+            f"HIERARCHY ERROR: "
+            f"Cannot change nickname for {member}. "
+            f"Check Manage Nicknames permission and role hierarchy."
+        )
+
+    except discord.HTTPException as error:
+        print(
+            f"DISCORD ERROR: "
+            f"Could not change nickname for {member}: {error}"
+        )
+
+    except Exception as error:
+        print(
+            f"NICKNAME CRASH SHIELD: "
+            f"{member}: {error}"
+        )
+
+
+# ============================================================
+# BOT READY
+# ============================================================
 
 @bot.event
 async def on_ready():
+
     print("----------------------------------------")
-    print(f"LIVE LOG: Bot has authenticated as {bot.user.name}")
-    print("STATUS: Active and waiting for message activity triggers...")
+    print(f"LIVE LOG: Bot is authenticated as {bot.user}")
+    print(f"BOT ID: {bot.user.id}")
+    print("AUTOMATION: Roblox nickname synchronization enabled.")
     print("----------------------------------------")
 
+
+# ============================================================
+# MESSAGE LISTENER
+# ============================================================
 
 @bot.event
 async def on_message(message):
-    """Triggers automatically the exact split-second any member sends a normal message."""
-    # Ignore bot accounts and ignore direct messages (DMs)
-    if message.author.bot or not message.guild:
+
+    # Ignore bots
+    if message.author.bot:
         return
 
-    # Pass the member object straight into our asynchronous lookup pipeline
-    await auto_sync_profile(message.author)
+    # Ignore DMs
+    if message.guild is None:
+        return
 
+    # Make sure the author is represented as a Member
+    if not isinstance(message.author, discord.Member):
+        return
+
+    # Automatically synchronize nickname
+    await auto_sync_nickname(message.author)
+
+    # Keep normal bot commands working
+    await bot.process_commands(message)
+
+
+# ============================================================
+# OPTIONAL COMMAND
+# ============================================================
+
+@bot.command()
+@commands.has_permissions(manage_nicknames=True)
+async def sync(ctx):
+    """
+    Manually synchronize your own nickname.
+    """
+
+    if not isinstance(ctx.author, discord.Member):
+        return
+
+    # Remove cooldown for manual synchronization
+    last_sync.pop(ctx.author.id, None)
+
+    await auto_sync_nickname(ctx.author)
+
+    await ctx.send(
+        "Nickname synchronization attempted.",
+        delete_after=5
+    )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+@sync.error
+async def sync_error(ctx, error):
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(
+            "You need the Manage Nicknames permission to use this command.",
+            delete_after=5
+        )
+
+
+# ============================================================
+# START BOT
+# ============================================================
 
 if __name__ == "__main__":
-    token = os.getenv("DISCORD_TOKEN")
-    if token:
-        bot.run(token)
-    else:
-        print("CRITICAL LOG: DISCORD_TOKEN is missing inside your GitHub Environments.")
+
+    if not TOKEN:
+        print(
+            "FATAL EXCEPTION: DISCORD_TOKEN is missing.\n"
+            "Set the DISCORD_TOKEN environment variable or "
+            "GitHub Actions secret."
+        )
+        raise SystemExit(1)
+
+    print("Starting Discord bot...")
+
+    bot.run(TOKEN)
