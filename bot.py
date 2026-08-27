@@ -4,7 +4,7 @@ import requests
 import io
 import os
 
-# Explicitly load all privileged intent gateways
+# 1. Force load required gateway intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True 
@@ -14,63 +14,59 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 @bot.event
 async def on_ready():
     print("----------------------------------------")
-    print(f"ONLINE: {bot.user.name} is connected and waiting for chat.")
+    print(f"ONLINE: {bot.user.name} is running perfectly.")
     print("----------------------------------------")
 
 @bot.command(name="syncpfp")
 async def syncpfp(ctx):
-    """Checks your native Discord Profile connections to find your Roblox account."""
+    """Automatically finds the sender's linked Roblox account and applies it."""
+    discord_user_id = ctx.author.id
     target_member = ctx.author
-    
-    # 1. Direct feedback to confirm the bot is listening to your message
-    await ctx.send("⏳ Fetching your profile connections from Discord...")
+
+    # Instant confirmation that the command fired
+    await ctx.send("⏳ Searching public registry for your connected Roblox account...")
 
     try:
-        # 2. Fetch the user's connected profiles directly from Discord's system
-        profile = await bot.fetch_user(target_member.id)
+        # Step 1: Query the unauthenticated, open RoVer Registry API for the executor's ID
+        rover_url = f"https://rover.link{discord_user_id}"
+        rover_resp = requests.get(rover_url)
         
-        # Pull profiles linked to your Discord account
-        connections = await target_member.profile() if hasattr(target_member, 'profile') else []
+        if rover_resp.status_code != 200:
+            await ctx.send("❌ Error: You are not verified! Please link your account for free at https://rover.link first.")
+            return
+            
+        data_payload = rover_resp.json()
+        roblox_id = data_payload.get("robloxId")
+        roblox_username = data_payload.get("robloxUsername")
         
-        # Hardcoded fallback target if the dynamic connection read is restricted by privacy flags
-        # If the bot cannot find your connected account, it will use this ID to ensure the profile builds successfully
-        roblox_id = None
-        roblox_username = "RobloxPlayer"
-
-        # Search for a native connection matching 'roblox'
-        for conn in connections:
-            if conn.get('type') == 'roblox':
-                roblox_id = conn.get('id')
-                roblox_username = conn.get('name')
-                break
-
-        # Fallback safeguard: If no native profile connection is shared, use the initial ID layout
         if not roblox_id:
-            # Setting your default fallback ID so it doesn't break if your privacy settings hide connections
-            roblox_id = 1519939877  
+            await ctx.send("❌ Error: No verified Roblox account found linked to your Discord profile.")
+            return
 
-        # 3. Pull image payload URL string directly from Roblox
+        # Step 2: Grab the exact headshot image link belonging to THEIR verified account
         roblox_api = f"https://roblox.com{roblox_id}&size=150x150&format=Png&isCircular=false"
         roblox_data = requests.get(roblox_api).json()
-        raw_image_url = roblox_data['data'][0]['imageUrl'] # Fixed array parsing error by targeting index 0
+        raw_image_url = roblox_data['data'][0]['imageUrl']
 
-        # 4. Stream payload directly into a memory binary buffer
+        # Step 3: Stream the image bytes directly into memory
         image_stream = requests.get(raw_image_url).content
         byte_buffer = io.BytesIO(image_stream)
 
-        # 5. Execute server profile swap
+        # Step 4: Securely apply it only to the user who ran the command
         try:
+            # Changes their server nickname to match their verified Roblox name
             if roblox_username:
                 await target_member.edit(nick=roblox_username)
             
+            # Upgrades their server-specific profile picture
             await target_member.edit(avatar=byte_buffer.read())
-            await ctx.send(f"🎯 Success! Updated your profile using Roblox ID: `{roblox_id}`")
+            await ctx.send(f"🎯 Success! Updated your profile to match your verified Roblox account: **{roblox_username}** (`{roblox_id}`)")
             
         except discord.Forbidden:
-            await ctx.send("❌ Discord Permission Error: You must drag the Bot's Role to the **VERY TOP** of your server's role list.")
+            await ctx.send("❌ Discord Permission Error: Move the Bot's Role to the **VERY TOP** of your Server Settings role list, or it can't edit your profile.")
 
     except Exception as error:
-        await ctx.send(f"⚠️ Runtime Error: `{str(error)}`")
+        await ctx.send(f"⚠️ Process Crash Prevented: `{str(error)}`")
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
