@@ -123,10 +123,7 @@ async def get_http_session():
 # DISCORD USER → ROBLOX USER ID
 # ============================================================
 
-async def get_bloxlink_roblox_id(
-    guild_id: int,
-    discord_user_id: int
-):
+async def get_bloxlink_roblox_id(guild_id, discord_user_id):
 
     session = await get_http_session()
 
@@ -140,85 +137,39 @@ async def get_bloxlink_roblox_id(
     }
 
     try:
-
         async with session.get(
             url,
             headers=headers
         ) as response:
 
-            print(
-                f"BLOXLINK | "
-                f"Discord {discord_user_id} | "
-                f"HTTP {response.status}"
-            )
+            body = await response.text()
 
-            if response.status == 404:
-
-                print(
-                    f"BLOXLINK | "
-                    f"No linked Roblox account for "
-                    f"{discord_user_id}"
-                )
-
-                return None
-
-            if response.status == 401:
-
-                print(
-                    "BLOXLINK | API key is invalid."
-                )
-
-                return None
+            print("========================================")
+            print("BLOXLINK DEBUG")
+            print(f"Guild ID: {guild_id}")
+            print(f"Discord ID: {discord_user_id}")
+            print(f"HTTP STATUS: {response.status}")
+            print(f"RESPONSE: {body}")
+            print("========================================")
 
             if response.status != 200:
-
-                body = await response.text()
-
-                print(
-                    f"BLOXLINK | "
-                    f"Unexpected response: {body}"
-                )
-
                 return None
 
             data = await response.json()
 
-            roblox_id = data.get(
-                "robloxID"
-            )
+            roblox_id = data.get("robloxID")
 
             if not roblox_id:
-
-                print(
-                    "BLOXLINK | Response did not contain "
-                    "robloxID."
-                )
-
+                print("BLOXLINK: No robloxID was returned.")
                 return None
+
+            print(f"BLOXLINK: Roblox ID = {roblox_id}")
 
             return int(roblox_id)
 
-    except asyncio.TimeoutError:
-
-        print(
-            "BLOXLINK | Request timed out."
-        )
-
-        return None
-
-    except aiohttp.ClientError as error:
-
-        print(
-            f"BLOXLINK | HTTP error: {error}"
-        )
-
-        return None
-
     except Exception as error:
 
-        print(
-            f"BLOXLINK | Error: {error}"
-        )
+        print(f"BLOXLINK ERROR: {error}")
 
         return None
 
