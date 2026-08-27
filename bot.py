@@ -13,10 +13,6 @@ from discord.ext import commands, tasks
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 BLOXLINK_API_KEY = os.getenv("BLOXLINK_API_KEY")
-
-# Put your Discord SERVER ID into this GitHub Secret.
-# The bot automatically uses the server it is being used in
-# for /syncpfp, so this is only needed for the automatic scan.
 BLOXLINK_GUILD_ID = os.getenv("BLOXLINK_GUILD_ID")
 
 SYNC_INTERVAL = 30
@@ -72,6 +68,7 @@ class RobloxProfileBot(commands.Bot):
             )
 
             for command in synced:
+
                 print(
                     f"  /{command.name}"
                 )
@@ -119,11 +116,14 @@ async def get_http_session():
 
 
 # ============================================================
-# BLOXLINK:
-# DISCORD USER → ROBLOX USER ID
+# BLOXLINK
+# DISCORD USER -> ROBLOX USER ID
 # ============================================================
 
-async def get_bloxlink_roblox_id(guild_id, discord_user_id):
+async def get_bloxlink_roblox_id(
+    guild_id,
+    discord_user_id
+):
 
     session = await get_http_session()
 
@@ -137,6 +137,7 @@ async def get_bloxlink_roblox_id(guild_id, discord_user_id):
     }
 
     try:
+
         async with session.get(
             url,
             headers=headers
@@ -153,30 +154,49 @@ async def get_bloxlink_roblox_id(guild_id, discord_user_id):
             print("========================================")
 
             if response.status != 200:
+
                 return None
 
-            data = await response.json()
+            try:
+
+                data = await response.json()
+
+            except Exception as error:
+
+                print(
+                    f"BLOXLINK JSON ERROR: {error}"
+                )
+
+                return None
 
             roblox_id = data.get("robloxID")
 
             if not roblox_id:
-                print("BLOXLINK: No robloxID was returned.")
+
+                print(
+                    "BLOXLINK: No robloxID was returned."
+                )
+
                 return None
 
-            print(f"BLOXLINK: Roblox ID = {roblox_id}")
+            print(
+                f"BLOXLINK: Roblox ID = {roblox_id}"
+            )
 
             return int(roblox_id)
 
     except Exception as error:
 
-        print(f"BLOXLINK ERROR: {error}")
+        print(
+            f"BLOXLINK ERROR: {error}"
+        )
 
         return None
 
 
 # ============================================================
-# ROBLOX:
-# USER ID → USERNAME
+# ROBLOX
+# USER ID -> USERNAME
 # ============================================================
 
 async def get_roblox_user(
@@ -222,8 +242,8 @@ async def get_roblox_user(
 
 
 # ============================================================
-# ROBLOX:
-# USER ID → AVATAR THUMBNAIL
+# ROBLOX
+# USER ID -> AVATAR
 # ============================================================
 
 async def get_roblox_avatar(
@@ -286,9 +306,7 @@ async def get_roblox_avatar(
 
 async def lookup_member(member):
 
-    print(
-        "----------------------------------------"
-    )
+    print("----------------------------------------")
 
     print(
         f"LOOKUP: {member} "
@@ -296,7 +314,7 @@ async def lookup_member(member):
     )
 
     # --------------------------------------------------------
-    # Bloxlink: Discord → Roblox
+    # Bloxlink
     # --------------------------------------------------------
 
     roblox_id = await get_bloxlink_roblox_id(
@@ -310,14 +328,12 @@ async def lookup_member(member):
             "RESULT: No Bloxlink Roblox account."
         )
 
-        print(
-            "----------------------------------------"
-        )
+        print("----------------------------------------")
 
         return None
 
     # --------------------------------------------------------
-    # Roblox user information
+    # Roblox user
     # --------------------------------------------------------
 
     roblox_user = await get_roblox_user(
@@ -371,11 +387,78 @@ async def lookup_member(member):
         f"ROBLOX AVATAR: {result['avatar_url']}"
     )
 
-    print(
-        "----------------------------------------"
-    )
+    print("----------------------------------------")
 
     return result
+
+
+# ============================================================
+# APPLY ROBLOX PROFILE TO DISCORD SERVER MEMBER
+# ============================================================
+
+async def apply_roblox_profile(
+    member,
+    result
+):
+
+    # ========================================================
+    # CHANGE SERVER NICKNAME
+    #
+    # IMPORTANT:
+    # This does NOT change the user's actual Discord account.
+    #
+    # It changes their nickname only inside this server.
+    # ========================================================
+
+    desired_nickname = result["username"]
+
+    # Discord nickname limit
+    if len(desired_nickname) > 32:
+
+        desired_nickname = desired_nickname[:32]
+
+    # Don't repeatedly edit the member
+    if member.display_name != desired_nickname:
+
+        try:
+
+            await member.edit(
+                nick=desired_nickname,
+                reason="Automatic Roblox/Bloxlink profile sync"
+            )
+
+            print(
+                f"NICKNAME UPDATED | "
+                f"{member} -> {desired_nickname}"
+            )
+
+        except discord.Forbidden:
+
+            print(
+                f"NICKNAME ERROR | "
+                f"{member} | Bot does not have permission."
+            )
+
+        except discord.HTTPException as error:
+
+            print(
+                f"NICKNAME HTTP ERROR | "
+                f"{member} | {error}"
+            )
+
+        except Exception as error:
+
+            print(
+                f"NICKNAME ERROR | "
+                f"{member} | {error}"
+            )
+
+    else:
+
+        print(
+            f"NICKNAME ALREADY CORRECT | "
+            f"{member}"
+        )
 
 
 # ============================================================
@@ -384,7 +467,7 @@ async def lookup_member(member):
 
 @bot.tree.command(
     name="syncpfp",
-    description="Find your Bloxlink Roblox account and get its current avatar."
+    description="Sync your Discord server profile with your Bloxlink Roblox account."
 )
 async def syncpfp(
     interaction: discord.Interaction
@@ -429,9 +512,23 @@ async def syncpfp(
 
         return
 
+    # ========================================================
+    # APPLY ROBLOX USERNAME AS DISCORD SERVER NICKNAME
+    # ========================================================
+
+    await apply_roblox_profile(
+        member,
+        result
+    )
+
+    # ========================================================
+    # EMBED
+    # ========================================================
+
     embed = discord.Embed(
-        title="Roblox Profile Found",
+        title="Roblox Profile Synced",
         description=(
+            f"**Discord User:** {member.mention}\n\n"
             f"**Username:** `{result['username']}`\n"
             f"**Display Name:** `{result['display_name']}`\n"
             f"**Roblox ID:** `{result['roblox_id']}`"
@@ -448,6 +545,10 @@ async def syncpfp(
         inline=False
     )
 
+    embed.set_footer(
+        text="Bloxlink → Roblox → Discord Server Profile"
+    )
+
     await interaction.followup.send(
         embed=embed,
         ephemeral=True
@@ -461,22 +562,15 @@ async def syncpfp(
 @tasks.loop(seconds=SYNC_INTERVAL)
 async def automatic_sync():
 
-    print(
-        "========================================"
-    )
-
-    print(
-        "30 SECOND SCAN"
-    )
-
-    print(
-        "========================================"
-    )
+    print("========================================")
+    print("30 SECOND SCAN")
+    print("========================================")
 
     for guild in bot.guilds:
 
         print(
-            f"SERVER: {guild.name}"
+            f"SERVER: {guild.name} "
+            f"({guild.id})"
         )
 
         for member in guild.members:
@@ -492,9 +586,19 @@ async def automatic_sync():
 
                 if result:
 
+                    # ----------------------------------------
+                    # APPLY ROBLOX PROFILE
+                    # ----------------------------------------
+
+                    await apply_roblox_profile(
+                        member,
+                        result
+                    )
+
                     print(
                         f"SYNC READY | "
                         f"{member} → "
+                        f"{result['username']} | "
                         f"{result['avatar_url']}"
                     )
 
@@ -511,7 +615,7 @@ async def automatic_sync():
 
 
 # ============================================================
-# START AUTOMATIC LOOP AFTER BOT READY
+# WAIT UNTIL BOT IS READY
 # ============================================================
 
 @automatic_sync.before_loop
@@ -527,25 +631,27 @@ async def before_automatic_sync():
 @bot.event
 async def on_ready():
 
-    print(
-        "========================================"
-    )
+    print("========================================")
+    print("BOT ONLINE")
+    print(f"Bot: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print("========================================")
 
-    print(
-        "BOT ONLINE"
-    )
 
-    print(
-        f"Bot: {bot.user}"
-    )
+# ============================================================
+# SHUTDOWN HTTP SESSION
+# ============================================================
 
-    print(
-        f"Bot ID: {bot.user.id}"
-    )
+@bot.event
+async def on_disconnect():
 
-    print(
-        "========================================"
-    )
+    global http_session
+
+    if http_session and not http_session.closed:
+
+        await http_session.close()
+
+        http_session = None
 
 
 # ============================================================
