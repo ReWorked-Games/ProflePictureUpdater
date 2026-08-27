@@ -1,40 +1,38 @@
 import os
 import asyncio
-import discord
+
 import aiohttp
+import discord
 
 from discord.ext import commands, tasks
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+BLOXLINK_API_KEY = os.getenv("BLOXLINK_API_KEY")
+
+# Put your Discord SERVER ID into this GitHub Secret.
+# The bot automatically uses the server it is being used in
+# for /syncpfp, so this is only needed for the automatic scan.
+BLOXLINK_GUILD_ID = os.getenv("BLOXLINK_GUILD_ID")
 
 SYNC_INTERVAL = 30
 
-# ------------------------------------------------------------
-# IMPORTANT:
-#
-# Put the REAL RoVer endpoint you have access to here.
-#
-# This script expects the endpoint to return JSON containing
-# the linked Roblox USERNAME.
-#
-# Example expected response:
-#
-# {
-#     "robloxUsername": "Builderman"
-# }
-#
-# Do NOT put the old:
-# https://rover.link{member.id}
-#
-# there was no verified endpoint for that URL.
-# ------------------------------------------------------------
 
-ROVER_API_URL = os.getenv("ROVER_API_URL")
+# ============================================================
+# VALIDATE CONFIG
+# ============================================================
+
+if not DISCORD_TOKEN:
+    print("FATAL ERROR: DISCORD_TOKEN is missing.")
+    raise SystemExit(1)
+
+if not BLOXLINK_API_KEY:
+    print("FATAL ERROR: BLOXLINK_API_KEY is missing.")
+    raise SystemExit(1)
 
 
 # ============================================================
@@ -51,7 +49,7 @@ intents.message_content = True
 # BOT
 # ============================================================
 
-class RobloxSyncBot(commands.Bot):
+class RobloxProfileBot(commands.Bot):
 
     def __init__(self):
 
@@ -67,15 +65,13 @@ class RobloxSyncBot(commands.Bot):
 
         try:
 
-            commands_synced = await self.tree.sync()
+            synced = await self.tree.sync()
 
             print(
-                f"SUCCESS: Registered "
-                f"{len(commands_synced)} slash command(s)."
+                f"SUCCESS: Registered {len(synced)} slash command(s)."
             )
 
-            for command in commands_synced:
-
+            for command in synced:
                 print(
                     f"  /{command.name}"
                 )
@@ -86,18 +82,16 @@ class RobloxSyncBot(commands.Bot):
                 f"SLASH COMMAND ERROR: {error}"
             )
 
-        # Start the 30-second automatic updater
-
         if not automatic_sync.is_running():
 
             automatic_sync.start()
 
             print(
-                "Automatic 30-second synchronization started."
+                "30-second automatic sync started."
             )
 
 
-bot = RobloxSyncBot()
+bot = RobloxProfileBot()
 
 
 # ============================================================
@@ -125,23 +119,124 @@ async def get_http_session():
 
 
 # ============================================================
-# ROVER
+# BLOXLINK:
+# DISCORD USER → ROBLOX USER ID
 # ============================================================
 
-async def get_rover_username(discord_id):
+async def get_bloxlink_roblox_id(
+    guild_id: int,
+    discord_user_id: int
+):
 
-    if not ROVER_API_URL:
+    session = await get_http_session()
+
+    url = (
+        "https://api.blox.link/v4/public/guilds/"
+        f"{guild_id}/discord-to-roblox/{discord_user_id}"
+    )
+
+    headers = {
+        "Authorization": BLOXLINK_API_KEY
+    }
+
+    try:
+
+        async with session.get(
+            url,
+            headers=headers
+        ) as response:
+
+            print(
+                f"BLOXLINK | "
+                f"Discord {discord_user_id} | "
+                f"HTTP {response.status}"
+            )
+
+            if response.status == 404:
+
+                print(
+                    f"BLOXLINK | "
+                    f"No linked Roblox account for "
+                    f"{discord_user_id}"
+                )
+
+                return None
+
+            if response.status == 401:
+
+                print(
+                    "BLOXLINK | API key is invalid."
+                )
+
+                return None
+
+            if response.status != 200:
+
+                body = await response.text()
+
+                print(
+                    f"BLOXLINK | "
+                    f"Unexpected response: {body}"
+                )
+
+                return None
+
+            data = await response.json()
+
+            roblox_id = data.get(
+                "robloxID"
+            )
+
+            if not roblox_id:
+
+                print(
+                    "BLOXLINK | Response did not contain "
+                    "robloxID."
+                )
+
+                return None
+
+            return int(roblox_id)
+
+    except asyncio.TimeoutError:
 
         print(
-            "ROVER ERROR: ROVER_API_URL is not configured."
+            "BLOXLINK | Request timed out."
         )
 
         return None
 
+    except aiohttp.ClientError as error:
+
+        print(
+            f"BLOXLINK | HTTP error: {error}"
+        )
+
+        return None
+
+    except Exception as error:
+
+        print(
+            f"BLOXLINK | Error: {error}"
+        )
+
+        return None
+
+
+# ============================================================
+# ROBLOX:
+# USER ID → USERNAME
+# ============================================================
+
+async def get_roblox_user(
+    roblox_id: int
+):
+
     session = await get_http_session()
 
-    url = ROVER_API_URL.format(
-        discord_id=discord_id
+    url = (
+        "https://users.roblox.com/v1/users/"
+        f"{roblox_id}"
     )
 
     try:
@@ -149,7 +244,8 @@ async def get_rover_username(discord_id):
         async with session.get(url) as response:
 
             print(
-                f"ROVER | Discord ID {discord_id} | "
+                f"ROBLOX USER | "
+                f"{roblox_id} | "
                 f"HTTP {response.status}"
             )
 
@@ -159,159 +255,35 @@ async def get_rover_username(discord_id):
 
             data = await response.json()
 
-            username = data.get(
-                "robloxUsername"
-            )
-
-            if not username:
-
-                username = data.get(
-                    "username"
-                )
-
-            if not username:
-
-                print(
-                    f"ROVER | No Roblox username returned "
-                    f"for {discord_id}"
-                )
-
-                return None
-
-            return username
-
-    except asyncio.TimeoutError:
-
-        print(
-            f"ROVER | Request timed out for {discord_id}"
-        )
-
-        return None
-
-    except aiohttp.ClientError as error:
-
-        print(
-            f"ROVER | HTTP error: {error}"
-        )
-
-        return None
+            return {
+                "id": data.get("id"),
+                "name": data.get("name"),
+                "displayName": data.get("displayName")
+            }
 
     except Exception as error:
 
         print(
-            f"ROVER | Error: {error}"
+            f"ROBLOX USER ERROR: {error}"
         )
 
         return None
 
 
 # ============================================================
-# ROBLOX USERNAME → USER ID
+# ROBLOX:
+# USER ID → AVATAR THUMBNAIL
 # ============================================================
 
-async def get_roblox_user_id(username):
-
-    session = await get_http_session()
-
-    url = (
-        "https://users.roblox.com/v1/usernames/users"
-    )
-
-    payload = {
-
-        "usernames": [
-            username
-        ],
-
-        "excludeBannedUsers": False
-    }
-
-    try:
-
-        async with session.post(
-            url,
-            json=payload
-        ) as response:
-
-            print(
-                f"ROBLOX USER LOOKUP | "
-                f"{username} | HTTP {response.status}"
-            )
-
-            if response.status != 200:
-
-                return None
-
-            data = await response.json()
-
-            users = data.get(
-                "data",
-                []
-            )
-
-            if not users:
-
-                print(
-                    f"ROBLOX | User not found: {username}"
-                )
-
-                return None
-
-            # Roblox returns the canonical username here.
-            user = users[0]
-
-            roblox_id = user.get(
-                "id"
-            )
-
-            canonical_username = user.get(
-                "name"
-            )
-
-            print(
-                f"ROBLOX | "
-                f"{canonical_username} = {roblox_id}"
-            )
-
-            return roblox_id
-
-    except asyncio.TimeoutError:
-
-        print(
-            f"ROBLOX | Username lookup timed out: "
-            f"{username}"
-        )
-
-        return None
-
-    except aiohttp.ClientError as error:
-
-        print(
-            f"ROBLOX | HTTP error: {error}"
-        )
-
-        return None
-
-    except Exception as error:
-
-        print(
-            f"ROBLOX | Lookup error: {error}"
-        )
-
-        return None
-
-
-# ============================================================
-# ROBLOX USER ID → AVATAR THUMBNAIL
-# ============================================================
-
-async def get_roblox_avatar_url(roblox_user_id):
+async def get_roblox_avatar(
+    roblox_id: int
+):
 
     session = await get_http_session()
 
     url = (
         "https://thumbnails.roblox.com/v1/users/avatar-headshot"
-        f"?userIds={roblox_user_id}"
+        f"?userIds={roblox_id}"
         "&size=420x420"
         "&format=Png"
         "&isCircular=false"
@@ -322,8 +294,8 @@ async def get_roblox_avatar_url(roblox_user_id):
         async with session.get(url) as response:
 
             print(
-                f"ROBLOX THUMBNAIL | "
-                f"{roblox_user_id} | "
+                f"ROBLOX AVATAR | "
+                f"{roblox_id} | "
                 f"HTTP {response.status}"
             )
 
@@ -346,190 +318,113 @@ async def get_roblox_avatar_url(roblox_user_id):
                 "imageUrl"
             )
 
-            if image_url:
-
-                print(
-                    f"ROBLOX AVATAR URL: {image_url}"
-                )
-
             return image_url
-
-    except asyncio.TimeoutError:
-
-        print(
-            f"ROBLOX | Thumbnail request timed out: "
-            f"{roblox_user_id}"
-        )
-
-        return None
-
-    except aiohttp.ClientError as error:
-
-        print(
-            f"ROBLOX | Thumbnail HTTP error: "
-            f"{error}"
-        )
-
-        return None
 
     except Exception as error:
 
         print(
-            f"ROBLOX | Thumbnail error: "
-            f"{error}"
+            f"ROBLOX AVATAR ERROR: {error}"
         )
 
         return None
 
 
 # ============================================================
-# COMPLETE ROBLOX LOOKUP
+# COMPLETE MEMBER LOOKUP
 # ============================================================
 
-async def get_member_roblox_avatar(member):
-
-    # 1. Discord ID
-    discord_id = member.id
-
-    # 2. Get linked Roblox USERNAME
-    username = await get_rover_username(
-        discord_id
-    )
-
-    if not username:
-
-        return None
+async def lookup_member(member):
 
     print(
-        f"LINKED ACCOUNT | "
-        f"{member} -> Roblox username: {username}"
+        "----------------------------------------"
     )
 
-    # 3. Username -> Roblox USER ID
-    roblox_user_id = await get_roblox_user_id(
-        username
+    print(
+        f"LOOKUP: {member} "
+        f"({member.id})"
     )
 
-    if not roblox_user_id:
+    # --------------------------------------------------------
+    # Bloxlink: Discord → Roblox
+    # --------------------------------------------------------
+
+    roblox_id = await get_bloxlink_roblox_id(
+        member.guild.id,
+        member.id
+    )
+
+    if not roblox_id:
+
+        print(
+            "RESULT: No Bloxlink Roblox account."
+        )
+
+        print(
+            "----------------------------------------"
+        )
 
         return None
 
-    # 4. Roblox USER ID -> avatar thumbnail
-    avatar_url = await get_roblox_avatar_url(
-        roblox_user_id
+    # --------------------------------------------------------
+    # Roblox user information
+    # --------------------------------------------------------
+
+    roblox_user = await get_roblox_user(
+        roblox_id
+    )
+
+    if not roblox_user:
+
+        print(
+            "RESULT: Roblox user could not be retrieved."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Roblox avatar
+    # --------------------------------------------------------
+
+    avatar_url = await get_roblox_avatar(
+        roblox_id
     )
 
     if not avatar_url:
 
+        print(
+            "RESULT: Roblox avatar could not be retrieved."
+        )
+
         return None
 
-    return {
-        "username": username,
-        "user_id": roblox_user_id,
+    result = {
+        "roblox_id": roblox_id,
+        "username": roblox_user["name"],
+        "display_name": roblox_user["displayName"],
         "avatar_url": avatar_url
     }
 
-
-# ============================================================
-# NICKNAME SYNCHRONIZATION
-# ============================================================
-
-async def sync_member(member):
-
-    if member.bot:
-
-        return
-
-    if member.guild is None:
-
-        return
-
-    roblox_data = await get_member_roblox_avatar(
-        member
-    )
-
-    if not roblox_data:
-
-        return
-
-    username = roblox_data["username"]
-
-    avatar_url = roblox_data["avatar_url"]
-
     print(
-        "----------------------------------------"
+        f"ROBLOX USERNAME: {result['username']}"
     )
 
     print(
-        f"MEMBER: {member}"
+        f"ROBLOX DISPLAY NAME: {result['display_name']}"
     )
 
     print(
-        f"ROBLOX USERNAME: {username}"
+        f"ROBLOX ID: {result['roblox_id']}"
     )
 
     print(
-        f"ROBLOX USER ID: {roblox_data['user_id']}"
-    )
-
-    print(
-        f"ROBLOX AVATAR: {avatar_url}"
+        f"ROBLOX AVATAR: {result['avatar_url']}"
     )
 
     print(
         "----------------------------------------"
     )
 
-    # Keep nickname synchronized where Discord permits it.
-
-    if member == member.guild.owner:
-
-        print(
-            f"SYNC | Cannot change server owner's nickname."
-        )
-
-        return
-
-    bot_member = member.guild.me
-
-    if bot_member is None:
-
-        return
-
-    if member.top_role >= bot_member.top_role:
-
-        print(
-            f"SYNC | Bot role is not high enough for {member}."
-        )
-
-        return
-
-    if member.nick != username:
-
-        try:
-
-            await member.edit(
-                nick=username,
-                reason="Roblox profile synchronization"
-            )
-
-            print(
-                f"SYNC | Nickname changed: "
-                f"{member} -> {username}"
-            )
-
-        except discord.Forbidden:
-
-            print(
-                f"SYNC | Discord denied nickname change "
-                f"for {member}"
-            )
-
-        except discord.HTTPException as error:
-
-            print(
-                f"SYNC | Discord HTTP error: {error}"
-            )
+    return result
 
 
 # ============================================================
@@ -538,7 +433,7 @@ async def sync_member(member):
 
 @bot.tree.command(
     name="syncpfp",
-    description="Find your linked Roblox account and retrieve its current avatar."
+    description="Find your Bloxlink Roblox account and get its current avatar."
 )
 async def syncpfp(
     interaction: discord.Interaction
@@ -553,64 +448,52 @@ async def syncpfp(
 
         return
 
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
     member = interaction.guild.get_member(
         interaction.user.id
     )
 
     if member is None:
 
-        await interaction.response.send_message(
-            "I couldn't find your server member profile.",
+        await interaction.followup.send(
+            "I couldn't find your server profile.",
             ephemeral=True
         )
 
         return
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    roblox_data = await get_member_roblox_avatar(
+    result = await lookup_member(
         member
     )
 
-    if not roblox_data:
+    if not result:
 
         await interaction.followup.send(
-            "I couldn't find a linked Roblox account or its avatar.",
+            "I couldn't find a Bloxlink-linked Roblox account for you.",
             ephemeral=True
         )
 
         return
-
-    username = roblox_data["username"]
-
-    roblox_id = roblox_data["user_id"]
-
-    avatar_url = roblox_data["avatar_url"]
-
-    # Discord cannot assign this URL to another member's
-    # server avatar through the bot API.
-    #
-    # We therefore return the verified Roblox information
-    # instead of pretending the unsupported Discord operation
-    # succeeded.
 
     embed = discord.Embed(
         title="Roblox Profile Found",
         description=(
-            f"**Username:** `{username}`\n"
-            f"**User ID:** `{roblox_id}`"
+            f"**Username:** `{result['username']}`\n"
+            f"**Display Name:** `{result['display_name']}`\n"
+            f"**Roblox ID:** `{result['roblox_id']}`"
         )
     )
 
     embed.set_thumbnail(
-        url=avatar_url
+        url=result["avatar_url"]
     )
 
     embed.add_field(
-        name="Roblox Avatar",
-        value=avatar_url,
+        name="Roblox Avatar URL",
+        value=result["avatar_url"],
         inline=False
     )
 
@@ -621,7 +504,7 @@ async def syncpfp(
 
 
 # ============================================================
-# AUTOMATIC 30 SECOND SYNC
+# AUTOMATIC 30 SECOND CHECK
 # ============================================================
 
 @tasks.loop(seconds=SYNC_INTERVAL)
@@ -632,7 +515,7 @@ async def automatic_sync():
     )
 
     print(
-        "AUTOMATIC SYNC | Starting 30-second scan"
+        "30 SECOND SCAN"
     )
 
     print(
@@ -642,34 +525,42 @@ async def automatic_sync():
     for guild in bot.guilds:
 
         print(
-            f"SERVER | {guild.name}"
+            f"SERVER: {guild.name}"
         )
 
         for member in guild.members:
 
+            if member.bot:
+                continue
+
             try:
 
-                await sync_member(
+                result = await lookup_member(
                     member
                 )
+
+                if result:
+
+                    print(
+                        f"SYNC READY | "
+                        f"{member} → "
+                        f"{result['avatar_url']}"
+                    )
 
             except Exception as error:
 
                 print(
-                    f"SYNC ERROR | "
+                    f"MEMBER ERROR | "
                     f"{member} | {error}"
                 )
 
-            # Small delay to avoid making a huge burst
-            # of requests.
-
             await asyncio.sleep(
-                0.10
+                0.1
             )
 
 
 # ============================================================
-# WAIT FOR BOT
+# START AUTOMATIC LOOP AFTER BOT READY
 # ============================================================
 
 @automatic_sync.before_loop
@@ -679,7 +570,7 @@ async def before_automatic_sync():
 
 
 # ============================================================
-# BOT READY
+# READY
 # ============================================================
 
 @bot.event
@@ -707,22 +598,6 @@ async def on_ready():
 
 
 # ============================================================
-# SHUTDOWN
-# ============================================================
-
-@bot.event
-async def on_close():
-
-    global http_session
-
-    if http_session is not None:
-
-        await http_session.close()
-
-        http_session = None
-
-
-# ============================================================
 # START
 # ============================================================
 
@@ -732,25 +607,6 @@ if __name__ == "__main__":
         "Starting Discord bot..."
     )
 
-    if not TOKEN:
-
-        print(
-            "FATAL ERROR: DISCORD_TOKEN is missing."
-        )
-
-        raise SystemExit(1)
-
-    if not ROVER_API_URL:
-
-        print(
-            "WARNING: ROVER_API_URL is not configured."
-        )
-
-        print(
-            "The Roblox username lookup cannot start "
-            "until the linked-account source is configured."
-        )
-
     bot.run(
-        TOKEN
+        DISCORD_TOKEN
     )
