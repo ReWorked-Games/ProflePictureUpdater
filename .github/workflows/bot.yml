@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Install Python
@@ -28,5 +28,6 @@ jobs:
       - name: Start Discord Bot
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          BLOXLINK_API_KEY: ${{ secrets.BLOXLINK_API_KEY }}
         run: |
           python -u bot.py
